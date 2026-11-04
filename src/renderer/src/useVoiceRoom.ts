@@ -8,14 +8,33 @@ const RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
 }
 
+const MAX_TEXT = 2000
+const MAX_FILE = 100 * 1024 * 1024 // 100 MB, files are held in RAM while receiving
+const CHUNK = 16 * 1024
+const MAX_BUFFER = 4 * 1024 * 1024
+
 type Signal = { description: RTCSessionDescriptionInit } | { candidate: RTCIceCandidateInit }
+
+type Incoming = {
+  key: string
+  size: number
+  received: number
+  chunks: ArrayBuffer[]
+  lastStep: number
+  skip: boolean
+}
 
 type Peer = {
   pc: RTCPeerConnection
-  polite: boolean // the polite side yields when both send offers at once
+  polite: boolean
   makingOffer: boolean
   ignoreOffer: boolean
   screenSender?: RTCRtpSender
+  chat?: RTCDataChannel
+  files?: RTCDataChannel
+  name?: string
+  incoming?: Incoming
+  sendChain: Promise<void>
 }
 
 export type ShareQuality = 'hd60' | 'qhd60'
@@ -28,12 +47,60 @@ export const PRESETS: Record<
   qhd60: { label: '1440p 60 fps', width: 2560, height: 1440, fps: 60, bitrate: 16_000_000 }
 }
 
-export function useVoiceRoom() {
+export type ChatMsg = { key: string; from: string; text: string; self: boolean }
+
+export type Transfer = {
+  key: string
+  who: string
+  fileName: string
+  size: number
+  progress: number // 0 to 1
+  direction: 'in' | 'out'
+  done: boolean
+  failed?: boolean
+  url?: string
+}
+
+const newKey = (): string => `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+
+function cleanName(input: unknown): string {
+  const s = String(input ?? '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 32)
+  return s || 'Guest'
+}
+
+// Remove paths and characters Windows does not allow
+function safeFileName(input: string): string {
+  const base = input.split(/[\\/]/).pop() ?? ''
+  const s = base
+    .replace(/[<>:"|?*\u0000-\u001f]/g, '_')
+    .trim()
+    .slice(-100)
+  return s || 'file'
+}
+
+function waitDrain(ch: RTCDataChannel): Promise<void> {
+  return new Promise((resolve) => {
+    const done = (): void => {
+      ch.removeEventListener('bufferedamountlow', done)
+      ch.removeEventListener('close', done)
+      resolve()
+    }
+    ch.addEventListener('bufferedamountlow', done)
+    ch.addEventListener('close', done)
+  })
+}
+
+export function useVoiceRoom(displayName: string) {
   const [joined, setJoined] = useState(false)
   const [peerIds, setPeerIds] = useState<string[]>([])
   const [muted, setMuted] = useState(false)
   const [sharing, setSharing] = useState(false)
   const [screens, setScreens] = useState<Record<string, MediaStream>>({})
+  const [chat, setChat] = useState<ChatMsg[]>([])
+  const [transfers, setTransfers] = useState<Transfer[]>([])
 
   const socketRef = useRef<Socket | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -41,10 +108,193 @@ export function useVoiceRoom() {
   const qualityRef = useRef<ShareQuality>('hd60')
   const peersRef = useRef<Map<string, Peer>>(new Map())
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  const urlsRef = useRef<Map<string, string>>(new Map())
+  const nameRef = useRef(displayName)
+  nameRef.current = displayName
 
   function send(to: string, data: Signal) {
     socketRef.current?.emit('signal', { to, data })
   }
+
+  // ---------- chat and file helpers ----------
+
+  function addChat(msg: ChatMsg) {
+    setChat((c) => [...c.slice(-199), msg]) // keep the last 200 messages only
+  }
+
+  function addTransfer(t: Transfer) {
+    setTransfers((list) => [...list, t])
+  }
+
+  function updateTransfer(key: string, patch: Partial<Transfer>) {
+    setTransfers((list) => list.map((t) => (t.key === key ? { ...t, ...patch } : t)))
+  }
+
+  function setupChannels(peer: Peer) {
+    // "negotiated" channels with fixed ids: both sides create them, no extra signaling
+    const chatCh = peer.pc.createDataChannel('chat', { negotiated: true, id: 0 })
+    const filesCh = peer.pc.createDataChannel('files', { negotiated: true, id: 1 })
+    filesCh.binaryType = 'arraybuffer'
+    filesCh.bufferedAmountLowThreshold = 1_000_000
+    peer.chat = chatCh
+    peer.files = filesCh
+
+    chatCh.onopen = () =>
+      chatCh.send(JSON.stringify({ t: 'hello', name: cleanName(nameRef.current) }))
+
+    chatCh.onmessage = (e) => {
+      if (typeof e.data !== 'string') return
+      try {
+        const m = JSON.parse(e.data)
+        if (m.t === 'hello') {
+          peer.name = cleanName(m.name)
+        } else if (typeof m.text === 'string') {
+          addChat({
+            key: newKey(),
+            from: cleanName(m.name),
+            text: m.text.slice(0, MAX_TEXT),
+            self: false
+          })
+        }
+      } catch {
+        /* ignore malformed messages */
+      }
+    }
+
+    filesCh.onmessage = (e) => handleFileMessage(peer, e.data)
+  }
+
+  function handleFileMessage(peer: Peer, data: string | ArrayBuffer) {
+    if (typeof data === 'string') {
+      let m: { t?: string; name?: unknown; size?: unknown; from?: unknown }
+      try {
+        m = JSON.parse(data)
+      } catch {
+        return
+      }
+
+      if (m.t === 'meta') {
+        const size = Number(m.size)
+        const ok = Number.isFinite(size) && size > 0 && size <= MAX_FILE
+        const key = newKey()
+        peer.incoming = { key, size, received: 0, chunks: [], lastStep: 0, skip: !ok }
+        if (ok) {
+          addTransfer({
+            key,
+            who: cleanName(m.from),
+            fileName: safeFileName(String(m.name ?? '')),
+            size,
+            progress: 0,
+            direction: 'in',
+            done: false
+          })
+        }
+      } else if (m.t === 'end') {
+        const inc = peer.incoming
+        peer.incoming = undefined
+        if (!inc || inc.skip) return
+        if (inc.received !== inc.size) {
+          updateTransfer(inc.key, { failed: true })
+          return
+        }
+        // Never trust the sender's MIME type
+        const url = URL.createObjectURL(new Blob(inc.chunks, { type: 'application/octet-stream' }))
+        urlsRef.current.set(inc.key, url)
+        updateTransfer(inc.key, { progress: 1, done: true, url })
+      }
+      return
+    }
+
+    // Binary chunk
+    const inc = peer.incoming
+    if (!inc || inc.skip) return
+    inc.received += data.byteLength
+    if (inc.received > inc.size) {
+      // sender is sending more than it announced: abort
+      inc.skip = true
+      inc.chunks = []
+      updateTransfer(inc.key, { failed: true })
+      return
+    }
+    inc.chunks.push(data)
+    const step = Math.floor((inc.received / inc.size) * 50) // update the UI every 2%
+    if (step !== inc.lastStep) {
+      inc.lastStep = step
+      updateTransfer(inc.key, { progress: inc.received / inc.size })
+    }
+  }
+
+  async function sendToPeer(peer: Peer, peerId: string, file: File, name: string) {
+    const ch = peer.files
+    if (!ch) return
+    const key = newKey()
+    addTransfer({
+      key,
+      who: peer.name ?? peerId.slice(0, 4),
+      fileName: name,
+      size: file.size,
+      progress: 0,
+      direction: 'out',
+      done: false
+    })
+    try {
+      ch.send(
+        JSON.stringify({ t: 'meta', name, size: file.size, from: cleanName(nameRef.current) })
+      )
+      let offset = 0
+      let lastStep = 0
+      while (offset < file.size) {
+        if (ch.readyState !== 'open') throw new Error('channel closed')
+        if (ch.bufferedAmount > MAX_BUFFER) await waitDrain(ch)
+        const buf = await file.slice(offset, offset + CHUNK).arrayBuffer()
+        ch.send(buf)
+        offset += buf.byteLength
+        const step = Math.floor((offset / file.size) * 50)
+        if (step !== lastStep) {
+          lastStep = step
+          updateTransfer(key, { progress: offset / file.size })
+        }
+      }
+      ch.send(JSON.stringify({ t: 'end' }))
+      updateTransfer(key, { progress: 1, done: true })
+    } catch {
+      updateTransfer(key, { failed: true })
+    }
+  }
+
+  function sendChat(text: string) {
+    const clean = text.trim().slice(0, MAX_TEXT)
+    if (!clean) return
+    const name = cleanName(nameRef.current)
+    const payload = JSON.stringify({ name, text: clean })
+    peersRef.current.forEach((p) => {
+      if (p.chat?.readyState === 'open') p.chat.send(payload)
+    })
+    addChat({ key: newKey(), from: name, text: clean, self: true })
+  }
+
+  function sendFile(file: File) {
+    if (file.size === 0) throw new Error('The file is empty')
+    if (file.size > MAX_FILE) throw new Error('File too large (limit is 100 MB)')
+    const name = safeFileName(file.name)
+    let count = 0
+    peersRef.current.forEach((peer, peerId) => {
+      if (peer.files?.readyState !== 'open') return
+      count++
+      // One file at a time per peer, so chunks never interleave
+      peer.sendChain = peer.sendChain.then(() => sendToPeer(peer, peerId, file, name))
+    })
+    if (count === 0) throw new Error('No one else is connected')
+  }
+
+  function dismissTransfer(key: string) {
+    const url = urlsRef.current.get(key)
+    if (url) URL.revokeObjectURL(url)
+    urlsRef.current.delete(key)
+    setTransfers((list) => list.filter((t) => t.key !== key))
+  }
+
+  // ---------- screen sharing ----------
 
   function attachScreen(peer: Peer) {
     const stream = screenStreamRef.current
@@ -66,7 +316,6 @@ export function useVoiceRoom() {
       /* not critical */
     }
 
-    // Bitrate and frame rate ceilings
     try {
       const params = sender.getParameters()
       if (!params.encodings?.length) params.encodings = [{}]
@@ -78,17 +327,19 @@ export function useVoiceRoom() {
     }
   }
 
+  // ---------- peers ----------
+
   function createPeer(peerId: string): Peer {
     const myId = socketRef.current!.id!
     const peer: Peer = {
       pc: new RTCPeerConnection(RTC_CONFIG),
       polite: myId < peerId,
       makingOffer: false,
-      ignoreOffer: false
+      ignoreOffer: false,
+      sendChain: Promise.resolve()
     }
     const { pc } = peer
 
-    // Handlers first, then tracks, so no event is missed
     pc.onnegotiationneeded = async () => {
       try {
         peer.makingOffer = true
@@ -129,16 +380,18 @@ export function useVoiceRoom() {
     peersRef.current.set(peerId, peer)
     setPeerIds([...peersRef.current.keys()])
 
-    // Send our microphone (this triggers the first negotiation)
+    // Data channels first, then tracks
+    setupChannels(peer)
     localStreamRef.current?.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current!))
-    // If we are already sharing, newcomers get the screen too
     attachScreen(peer)
 
     return peer
   }
 
   function removePeer(peerId: string) {
-    peersRef.current.get(peerId)?.pc.close()
+    const peer = peersRef.current.get(peerId)
+    if (peer?.incoming && !peer.incoming.skip) updateTransfer(peer.incoming.key, { failed: true })
+    peer?.pc.close()
     peersRef.current.delete(peerId)
     const audio = audioElsRef.current.get(peerId)
     if (audio) audio.srcObject = null
@@ -152,20 +405,16 @@ export function useVoiceRoom() {
   }
 
   async function join(roomId: string) {
-    // 1. Capture the microphone
     localStreamRef.current = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true },
       video: false
     })
 
-    // 2. Connect to the signaling server
     const socket = io(SERVER_URL)
     socketRef.current = socket
     socket.on('connect_error', (err) => alert('Connection failed: ' + err.message))
 
-    // Newcomer: just create the peers. Adding tracks triggers the offers.
     socket.on('peers', (existing: string[]) => existing.forEach((id) => createPeer(id)))
-
     socket.on('peer-joined', () => {})
 
     socket.on('signal', async ({ from, data }: { from: string; data: Signal }) => {
@@ -217,8 +466,8 @@ export function useVoiceRoom() {
     })
 
     const track = stream.getVideoTracks()[0]
-    track.contentHint = 'motion' // keeps 60 fps when the network is tight
-    track.onended = () => stopShare() // the user closed the shared window
+    track.contentHint = 'motion'
+    track.onended = () => stopShare()
 
     screenStreamRef.current = stream
     peersRef.current.forEach((peer) => attachScreen(peer))
@@ -244,6 +493,10 @@ export function useVoiceRoom() {
     localStreamRef.current = null
     socketRef.current?.disconnect()
     socketRef.current = null
+    urlsRef.current.forEach((url) => URL.revokeObjectURL(url))
+    urlsRef.current.clear()
+    setChat([])
+    setTransfers([])
     setJoined(false)
     setMuted(false)
   }
@@ -255,8 +508,23 @@ export function useVoiceRoom() {
     setMuted(!track.enabled)
   }
 
-  // Clean up if the component unmounts
   useEffect(() => leave, [])
 
-  return { joined, peerIds, muted, sharing, screens, join, leave, toggleMute, startShare, stopShare }
+  return {
+    joined,
+    peerIds,
+    muted,
+    sharing,
+    screens,
+    chat,
+    transfers,
+    join,
+    leave,
+    toggleMute,
+    startShare,
+    stopShare,
+    sendChat,
+    sendFile,
+    dismissTransfer
+  }
 }
