@@ -1,7 +1,9 @@
-import { app, shell, BrowserWindow, ipcMain } from 'electron'
+import { app, shell, BrowserWindow, desktopCapturer, ipcMain, session } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+
+let selectedSourceId: string | null = null
 
 function createWindow(): void {
   // Create the browser window.
@@ -59,6 +61,30 @@ app.whenReady().then(() => {
     // dock icon is clicked and there are no other windows open.
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  ipcMain.handle('screen:sources', async () => {
+  const sources = await desktopCapturer.getSources({
+    types: ['screen', 'window'],
+    thumbnailSize: { width: 320, height: 180 },
+    fetchWindowIcons: false
+  })
+  return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+})
+
+ipcMain.handle('screen:select', (_event, id: unknown) => {
+  selectedSourceId = typeof id === 'string' ? id : null
+})
+
+session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+  desktopCapturer
+    .getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
+    .then((sources) => {
+      const source = sources.find((s) => s.id === selectedSourceId)
+      selectedSourceId = null
+      if (source) callback({ video: source })
+      else callback({})
+    })
+})
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common
