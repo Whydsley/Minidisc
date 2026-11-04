@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 
-const SERVER_URL = 'http://localhost:3001'
+const SERVER_URL =  import.meta.env.VITE_SERVER_URL ?? 'http://localhost:3001'
 
 // Free public STUN server. We'll add our own TURN server later.
 const RTC_CONFIG: RTCConfiguration = {
@@ -74,6 +74,8 @@ export function useVoiceRoom() {
     // 2. Connect to the signaling server
     const socket = io(SERVER_URL)
     socketRef.current = socket
+
+    socket.on('connect_error', (err) => alert('Connection failed: ' + err.message))
 
     // We are the newcomer: call everyone already in the room
     socket.on('peers', async (existing: string[]) => {
