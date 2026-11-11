@@ -1,5 +1,5 @@
 import { ChangeEvent, useEffect, useRef, useState } from 'react'
-import { useVoiceRoom, PRESETS, ShareQuality } from './useVoiceRoom'
+import { useVoiceRoom, PRESETS, ShareQuality, NoiseMode } from './useVoiceRoom'
 
 type Source = { id: string; name: string; thumbnail: string }
 
@@ -19,6 +19,36 @@ function loadName(): string {
   }
 }
 
+function loadPref(key: string, fallback: string): string {
+  try {
+    return localStorage.getItem('minidisc:' + key) ?? fallback
+  } catch {
+    return fallback
+  }
+}
+
+function savePref(key: string, value: string): void {
+  try {
+    localStorage.setItem('minidisc:' + key, value)
+  } catch {
+    /* not critical */
+  }
+}
+
+function normalizeServerUrl(input: string): string | null {
+  let value = input.trim()
+  if (!value) return null
+  if (!/^https?:\/\//i.test(value)) {
+    const local = /^(localhost|\d{1,3}(\.\d{1,3}){3})(:|\/|$)/.test(value)
+    value = (local ? 'http://' : 'https://') + value
+  }
+  try {
+    return new URL(value).origin
+  } catch {
+    return null
+  }
+}
+
 function RemoteScreen({ stream }: { stream: MediaStream }) {
   return (
     <video
@@ -34,12 +64,18 @@ function RemoteScreen({ stream }: { stream: MediaStream }) {
 }
 
 export default function App() {
-  const [room, setRoom] = useState('general')
+  const [serverUrl, setServerUrl] = useState(
+    loadPref('serverUrl', import.meta.env.VITE_SERVER_URL ?? '')
+  )
   const [name, setName] = useState(loadName())
   const [error, setError] = useState('')
   const [sources, setSources] = useState<Source[] | null>(null)
   const [quality, setQuality] = useState<ShareQuality>('hd60')
   const [draft, setDraft] = useState('')
+  const [mics, setMics] = useState<MediaDeviceInfo[]>([])
+  const [boost, setBoost] = useState(Number(loadPref('boost', '100')))
+  const [micId, setMicId] = useState(loadPref('micId', ''))
+  const [noise, setNoise] = useState<NoiseMode>(loadPref('noise', 'standard') as NoiseMode)
   const v = useVoiceRoom(name)
 
   const fileInput = useRef<HTMLInputElement>(null)
@@ -48,6 +84,16 @@ export default function App() {
   useEffect(() => {
     chatEnd.current?.scrollIntoView()
   }, [v.chat.length])
+
+  useEffect(() => {
+    const load = async (): Promise<void> => {
+      const all = await navigator.mediaDevices.enumerateDevices()
+      setMics(all.filter((d) => d.kind === 'audioinput'))
+    }
+    load()
+    navigator.mediaDevices.addEventListener('devicechange', load)
+    return () => navigator.mediaDevices.removeEventListener('devicechange', load)
+  }, [v.joined])
 
   function changeName(n: string) {
     setName(n)
@@ -59,9 +105,28 @@ export default function App() {
   }
 
   async function handleJoin() {
+    const url = normalizeServerUrl(serverUrl)
+    if (!url) return setError('Type the server address first')
+      try {
+        setError('')
+        savePref('serverUrl', url)
+        setServerUrl(url)
+        v.setMicBoost(boost)
+        await v.join(url, micId, noise)
+    } catch (e) {
+      setError('Could not connect: ' + (e instanceof Error ? e.message : String(e)))
+    }
+  }
+
+  async function applyMic(nextId: string, nextNoise: NoiseMode) {
+    setMicId(nextId)
+    setNoise(nextNoise)
+    savePref('micId', nextId)
+    savePref('noise', nextNoise)
+    if (!v.joined) return
     try {
       setError('')
-      await v.join(room)
+      await v.changeMic(nextId, nextNoise)
     } catch (e) {
       setError(String(e))
     }
@@ -103,19 +168,60 @@ export default function App() {
     <div style={{ padding: 24, fontFamily: 'sans-serif' }}>
       <h1>Minidisc</h1>
 
+      <div style={{ marginBottom: 12}}>
+        <label>Microphone </label>
+        <select value={micId} onChange={(e) => applyMic(e.target.value, noise)}>
+          <option value="">System default</option>
+          {mics.map((m,i) => (
+            <option key={m.deviceId} value={m.deviceId}>
+              {m.label || `Microphone ${i + 1}`}
+            </option>
+          ))}
+        </select>{' '}
+        <label>Noise </label>
+        <select value={noise} onChange={(e) => applyMic(micId, e.target.value as NoiseMode)}>
+          <option value="off">Off</option>
+          <option value="standard">Standard</option>
+          <option value="strong">Strong (RNNoise)</option>
+        </select>
+        {' '}
+        <label>Mic boost </label>
+        <input
+          type='range'
+          min={100}
+          max={400}
+          step={10}
+          value={boost}
+          onChange={(e) => {
+            const n = Number(e.target.value)
+            setBoost(n)
+            savePref('boost', String(n))
+            v.setMicBoost(n)
+          }}
+        />{' '}
+        {boost}%
+      </div>
+
       {!v.joined ? (
         <>
           <div style={{ marginBottom: 8 }}>
             <label>Your name </label>
             <input value={name} maxLength={32} onChange={(e) => changeName(e.target.value)} />
           </div>
-          <input value={room} onChange={(e) => setRoom(e.target.value)} />
+          <div style={{ marginBottom: 8 }}>
+            <label>Server Address </label>
+            <input
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+              placeholder='https://something.trycloudflare.com'
+              style={{ width: 340}}/>
+          </div>
           <button onClick={handleJoin}>Join voice</button>
         </>
       ) : (
         <>
           <p>
-            In room <b>{room}</b> with {v.peerIds.length} other(s)
+            Connected with {v.peerIds.length} other(s)
           </p>
           <button onClick={v.toggleMute}>{v.muted ? 'Unmute' : 'Mute'}</button>
           {v.sharing ? (
@@ -124,6 +230,22 @@ export default function App() {
             <button onClick={openPicker}>Share screen</button>
           )}
           <button onClick={v.leave}>Leave</button>
+          {v.peerIds.map((id) => (
+            <div key={id} style={{ marginTop: 6 }}>
+              <span style={{ display: 'inline-block', width: 140 }}>
+                {v.names[id] ?? id.slice(0, 4)}
+              </span>
+              <input
+              type="range"
+              min={0}
+              max={300}
+              step={5}
+              value={v.volumes[id] ?? 100}
+              onChange={(e) => v.setVolume(id, Number(e.target.value))}
+              />{' '}
+              {v.volumes[id] ?? 100}%
+            </div>
+          ))}
         </>
       )}
 

@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
+import { loadRnnoise, RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor'
+import rnnoiseWorkletPath from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url'
+import rnnoiseWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url'
+import rnnoiseSimdWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url'
 
-const SERVER_URL = import.meta.env.VITE_SERVER_URL ?? 'http://localhost:3001'
+const ROOM = 'main'
 
 // Free public STUN server. We'll add our own TURN server later.
 const RTC_CONFIG: RTCConfiguration = {
@@ -30,6 +34,7 @@ type Peer = {
   makingOffer: boolean
   ignoreOffer: boolean
   screenSender?: RTCRtpSender
+  micSender?: RTCRtpSender
   chat?: RTCDataChannel
   files?: RTCDataChannel
   name?: string
@@ -93,6 +98,78 @@ function waitDrain(ch: RTCDataChannel): Promise<void> {
   })
 }
 
+export type NoiseMode = 'off' | 'standard' | 'strong'
+
+type Mic = { stream: MediaStream; cleanup: () => void; setGain: (g: number) => void }
+
+async function openMic(deviceId: string, noise: NoiseMode, boost: number) : Promise<Mic> {
+  const raw = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      deviceId: deviceId ? { exact: deviceId } : undefined,
+      echoCancellation: false,
+      autoGainControl: true,
+      //Only one noise filter at a time: the browser's, or RNNoise
+      noiseSuppression: false
+    },
+    video: false
+  })
+  const stopRaw = (): void => raw.getTracks().forEach((t) => t.stop())
+
+  const ctx = new AudioContext({ sampleRate: 48000 }) // RNNoise needs 48 KHz
+  try {
+    const source = ctx.createMediaStreamSource(raw)
+    let last: AudioNode = source
+
+    if (noise === 'strong') {
+      await ctx.audioWorklet.addModule(rnnoiseWorkletPath)
+      const wasmBinary = await loadRnnoise({ url: rnnoiseWasmPath, simdUrl: rnnoiseSimdWasmPath })
+      const denoise = new RnnoiseWorkletNode(ctx, { wasmBinary, maxChannels: 1 })
+      last.connect(denoise)
+      last = denoise
+    }
+
+    // Leveler: lifts quiet speech and tames peaks
+    const leveler = ctx.createDynamicsCompressor()
+    leveler.threshold.value = -30
+    leveler.knee.value = 20
+    leveler.ratio.value = 4
+    leveler.attack.value = 0.005
+    leveler.release.value = 0.2
+
+    const gain = ctx.createGain()
+    gain.gain.value = boost
+
+    // Limiter: stops the boost from clipping
+    const limiter = ctx.createDynamicsCompressor()
+    limiter.threshold.value = -3
+    limiter.knee.value = 0
+    limiter.ratio.value = 20
+    limiter.attack.value = 0.003
+    limiter.release.value = 0.1
+
+    const dest = ctx.createMediaStreamDestination()
+    last.connect(leveler)
+    leveler.connect(gain)
+    gain.connect(limiter)
+    limiter.connect(dest)
+
+    return {
+      stream: dest.stream,
+      cleanup: () => {
+        stopRaw()
+        ctx.close().catch(() => {})
+      },
+      setGain: (g: number) => {
+        gain.gain.value = g
+      }
+    }
+  } catch (e) {
+    stopRaw()
+    ctx.close().catch(() => {})
+    throw e
+  }
+}
+
 export function useVoiceRoom(displayName: string) {
   const [joined, setJoined] = useState(false)
   const [peerIds, setPeerIds] = useState<string[]>([])
@@ -101,6 +178,8 @@ export function useVoiceRoom(displayName: string) {
   const [screens, setScreens] = useState<Record<string, MediaStream>>({})
   const [chat, setChat] = useState<ChatMsg[]>([])
   const [transfers, setTransfers] = useState<Transfer[]>([])
+  const [volumes, setVolumes] = useState<Record<string, number>>({})
+  const [names, setNames] = useState<Record<string, string>>({})
 
   const socketRef = useRef<Socket | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -108,9 +187,13 @@ export function useVoiceRoom(displayName: string) {
   const qualityRef = useRef<ShareQuality>('hd60')
   const peersRef = useRef<Map<string, Peer>>(new Map())
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  const micRef = useRef<Mic | null>(null)
   const urlsRef = useRef<Map<string, string>>(new Map())
   const nameRef = useRef(displayName)
   nameRef.current = displayName
+  const volumeCtxRef = useRef<AudioContext | null>(null)
+  const gainsRef = useRef<Map<string, GainNode>>(new Map())
+  const boostRef = useRef(1)
 
   function send(to: string, data: Signal) {
     socketRef.current?.emit('signal', { to, data })
@@ -130,7 +213,7 @@ export function useVoiceRoom(displayName: string) {
     setTransfers((list) => list.map((t) => (t.key === key ? { ...t, ...patch } : t)))
   }
 
-  function setupChannels(peer: Peer) {
+  function setupChannels(peer: Peer, peerId: string) {
     // "negotiated" channels with fixed ids: both sides create them, no extra signaling
     const chatCh = peer.pc.createDataChannel('chat', { negotiated: true, id: 0 })
     const filesCh = peer.pc.createDataChannel('files', { negotiated: true, id: 1 })
@@ -148,6 +231,7 @@ export function useVoiceRoom(displayName: string) {
         const m = JSON.parse(e.data)
         if (m.t === 'hello') {
           peer.name = cleanName(m.name)
+          setNames((n) => ({ ...n, [peerId]: peer.name! }))
         } else if (typeof m.text === 'string') {
           addChat({
             key: newKey(),
@@ -359,13 +443,33 @@ export function useVoiceRoom(displayName: string) {
     pc.ontrack = (e) => {
       const stream = e.streams[0]
       if (e.track.kind === 'audio') {
+        // Muted element: Chromium needs it attached, or WebRTC audio stays silent in Web Audio
         let audio = audioElsRef.current.get(peerId)
         if (!audio) {
           audio = new Audio()
-          audio.autoplay = true
+          audio.muted = true
           audioElsRef.current.set(peerId, audio)
         }
         audio.srcObject = stream
+        audio.play().catch(() => {})
+
+        let ctx = volumeCtxRef.current
+        if (!ctx) {
+          ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive'})
+          volumeCtxRef.current = ctx
+        }
+        ctx.resume().catch(() => {})
+
+        const previous = gainsRef.current.get(peerId)
+        const level = previous ? previous.gain.value : 1
+        previous?.disconnect()
+
+        const gain = ctx.createGain()
+        gain.gain.value = level
+        ctx.createMediaStreamSource(stream).connect(gain)
+        gain.connect(ctx.destination)
+        gainsRef.current.set(peerId, gain)
+        setVolumes((v) => ({ ...v, [peerId]: Math.round(level * 100) }))
       } else {
         setScreens((s) => ({ ...s, [peerId]: stream }))
         stream.onremovetrack = () =>
@@ -381,8 +485,9 @@ export function useVoiceRoom(displayName: string) {
     setPeerIds([...peersRef.current.keys()])
 
     // Data channels first, then tracks
-    setupChannels(peer)
-    localStreamRef.current?.getTracks().forEach((t) => pc.addTrack(t, localStreamRef.current!))
+    setupChannels(peer, peerId)
+    const micTrack = localStreamRef.current?.getAudioTracks()[0]
+    if (micTrack) peer.micSender = pc.addTrack(micTrack, localStreamRef.current!)
     attachScreen(peer)
 
     return peer
@@ -396,6 +501,13 @@ export function useVoiceRoom(displayName: string) {
     const audio = audioElsRef.current.get(peerId)
     if (audio) audio.srcObject = null
     audioElsRef.current.delete(peerId)
+    gainsRef.current.get(peerId)?.disconnect()
+    gainsRef.current.delete(peerId)
+    setVolumes((v) => {
+      const next = { ...v }
+      delete next[peerId]
+      return next
+    })
     setScreens((s) => {
       const next = { ...s }
       delete next[peerId]
@@ -404,15 +516,13 @@ export function useVoiceRoom(displayName: string) {
     setPeerIds([...peersRef.current.keys()])
   }
 
-  async function join(roomId: string) {
-    localStreamRef.current = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
-      video: false
-    })
+  async function join(serverUrl: string, micDeviceId: string, noise: NoiseMode) {
+    const mic = await openMic(micDeviceId, noise, boostRef.current)
+    micRef.current = mic
+    localStreamRef.current = mic.stream
 
-    const socket = io(SERVER_URL)
+    const socket = io(serverUrl)
     socketRef.current = socket
-    socket.on('connect_error', (err) => alert('Connection failed: ' + err.message))
 
     socket.on('peers', (existing: string[]) => existing.forEach((id) => createPeer(id)))
     socket.on('peer-joined', () => {})
@@ -447,7 +557,24 @@ export function useVoiceRoom(displayName: string) {
 
     socket.on('peer-left', (peerId: string) => removePeer(peerId))
 
-    socket.emit('join', roomId)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('Server did not answer')), 8000)
+        socket.once('connect', () => {
+          clearTimeout(timer)
+          resolve()
+        })
+        socket.once('connect_error', (err) => {
+          clearTimeout(timer)
+          reject(err)
+        })
+      })
+    } catch (e) {
+      leave() // releases the mic and closes the socket
+      throw e
+    }
+
+    socket.emit('join', ROOM)
     setJoined(true)
   }
 
@@ -491,8 +618,13 @@ export function useVoiceRoom(displayName: string) {
     peersRef.current.forEach((_, id) => removePeer(id))
     localStreamRef.current?.getTracks().forEach((t) => t.stop())
     localStreamRef.current = null
+    micRef.current?.cleanup
+    micRef.current = null
     socketRef.current?.disconnect()
     socketRef.current = null
+    volumeCtxRef.current?.close().catch(() => {})
+    volumeCtxRef.current = null
+    gainsRef.current.clear()
     urlsRef.current.forEach((url) => URL.revokeObjectURL(url))
     urlsRef.current.clear()
     setChat([])
@@ -501,11 +633,34 @@ export function useVoiceRoom(displayName: string) {
     setMuted(false)
   }
 
+  function setMicBoost(percent: number) {
+    boostRef.current = percent / 100
+    micRef.current?.setGain(boostRef.current)
+  }
+
   function toggleMute() {
     const track = localStreamRef.current?.getAudioTracks()[0]
     if (!track) return
     track.enabled = !track.enabled
     setMuted(!track.enabled)
+  }
+
+  function setVolume(peerId: string, percent: number) {
+    const gain = gainsRef.current.get(peerId)
+    if (gain) gain.gain.value = percent / 100
+    setVolumes((v) => ({ ...v, [peerId]: percent }))
+  }
+
+  // Switch microphone or noise mode during a call, without renegotiating
+  async function changeMic(micDeviceId: string, noise: NoiseMode) {
+    const next = await openMic(micDeviceId, noise, boostRef.current)
+    const track = next.stream.getAudioTracks()[0]
+    track.enabled = localStreamRef.current?.getAudioTracks()[0]?.enabled ?? true // Keep mute state
+    await Promise.all([...peersRef.current.values()].map((p) => p.micSender?.replaceTrack(track)))
+    const old = micRef.current
+    micRef.current = next
+    localStreamRef.current = next.stream
+    old?.cleanup
   }
 
   useEffect(() => leave, [])
@@ -518,13 +673,18 @@ export function useVoiceRoom(displayName: string) {
     screens,
     chat,
     transfers,
+    volumes,
+    names,
     join,
     leave,
     toggleMute,
+    changeMic,
     startShare,
     stopShare,
     sendChat,
     sendFile,
-    dismissTransfer
+    dismissTransfer,
+    setVolume,
+    setMicBoost
   }
 }
