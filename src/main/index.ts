@@ -2,17 +2,22 @@ import { app, shell, BrowserWindow, desktopCapturer, ipcMain, session } from 'el
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
+import { startHost, stopHost } from './hostServer'
 
 let selectedSourceId: string | null = null
 
 function createWindow(): void {
   // Create the browser window.
   const mainWindow = new BrowserWindow({
-    width: 900,
-    height: 670,
+    width: 1000,
+    height: 640,
+    minWidth: 720,
+    minHeight: 480,
+    frame: false,
+    backgroundColor: '#1e1f22',
     show: false,
     autoHideMenuBar: true,
-    ...(process.platform === 'linux' ? { icon } : {}),
+    icon,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
@@ -20,6 +25,8 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
+    mainWindow.on('maximize', () => mainWindow.webContents.send('win:maximized', true))
+    mainWindow.on('unmaximize', () => mainWindow.webContents.send('win:maximized', false))
     mainWindow.show()
   })
 
@@ -42,7 +49,7 @@ function createWindow(): void {
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(() => {
   // Set app user model id for windows
-  electronApp.setAppUserModelId('com.electron')
+  electronApp.setAppUserModelId('com.whydsley.minidisc')
 
   // Default open or close DevTools by F12 in development
   // and ignore CommandOrControl + R in production.
@@ -53,6 +60,19 @@ app.whenReady().then(() => {
 
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
+
+  const winOf = (e: Electron.IpcMainInvokeEvent): BrowserWindow | null => BrowserWindow.fromWebContents(e.sender)
+
+  ipcMain.handle('host:start', () => startHost())
+  ipcMain.handle('host:stop', () => stopHost())
+  ipcMain.handle('win:minimize', (e) => winOf(e)?.minimize())
+  ipcMain.handle('win:toggle-maximize', (e) => {
+    const w = winOf(e)
+    if (!w) return
+    if (w.isMaximized()) w.unmaximize()
+    else w.maximize()
+  })
+  ipcMain.handle('win:close', (e) => winOf(e)?.close())
 
   createWindow()
 
@@ -94,6 +114,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  stopHost()
 })
 
 // In this file you can include the rest of your app's specific main process

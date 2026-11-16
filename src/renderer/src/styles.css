@@ -1,0 +1,98 @@
+:root {
+  --bg-0: #1e1f22; --bg-1: #232428; --bg-2: #2b2d31; --bg-3: #313338;
+  --bg-4: #383a40; --bg-5: #43464d; --line: #3f4147;
+  --text: #dbdee1; --muted: #949ba4;
+  --accent: #5b6bf0; --green: #3ba55d; --red: #ed4245;
+}
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--bg-0); color: var(--text); font: 13px/1.4 'Segoe UI', system-ui, sans-serif; overflow: hidden; user-select: none; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; border: none; background: var(--bg-4); border-radius: 6px; padding: 6px 12px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+button:hover { background: var(--bg-5); }
+button.primary { background: var(--accent); color: #fff; }
+button.primary:hover { background: #6d7bf3; }
+input:not([type='range']):not([type='file']), select { background: var(--bg-1); border: 1px solid var(--line); border-radius: 6px; padding: 7px 9px; width: 100%; outline: none; }
+input:focus, select:focus { border-color: var(--accent); }
+.err { color: var(--red); margin: 6px 0; }
+.sm { font-size: 11px; color: var(--muted); }
+
+.app { display: grid; grid-template-rows: 32px minmax(0, 1fr); height: 100%; }
+.titlebar { display: flex; align-items: center; background: var(--bg-0); -webkit-app-region: drag; }
+.titlebar .title { padding-left: 12px; font-size: 12px; color: var(--muted); flex: 1; }
+.wbtns { display: flex; height: 100%; -webkit-app-region: no-drag; }
+.wbtns button { width: 46px; height: 100%; border-radius: 0; background: transparent; padding: 0; }
+.wbtns button:hover { background: var(--bg-4); }
+.wbtns button.close:hover { background: var(--red); color: #fff; }
+
+.connect { display: flex; align-items: center; justify-content: center; background: var(--bg-3); }
+.card { width: 340px; display: flex; flex-direction: column; gap: 6px; }
+.card h1 { margin: 0 0 8px; font-size: 22px; font-weight: 500; }
+.card label { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.card button { margin-top: 12px; }
+.card .link { background: transparent; color: var(--muted); margin-top: 4px; }
+
+.body { display: grid; grid-template-columns: 172px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 52px; }
+.side { background: var(--bg-2); padding: 10px 8px; overflow-y: auto; min-width: 0; }
+.srv { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 2px 6px 10px; white-space: nowrap; overflow: hidden; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); flex: none; }
+.lbl { font-size: 11px; color: var(--muted); padding: 0 6px 6px; }
+.mem { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 6px; }
+.mem.click { cursor: pointer; }
+.mem.click:hover { background: var(--bg-4); }
+.av { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; color: #fff; flex: none; }
+.nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vol { display: flex; align-items: center; gap: 6px; padding: 2px 8px 8px 42px; font-size: 11px; color: var(--muted); }
+.vol input { flex: 1; min-width: 0; }
+
+.main { background: var(--bg-3); display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 10px; gap: 8px; }
+.banner { background: var(--bg-1); color: var(--muted); border-radius: 6px; padding: 4px 10px; font-size: 12px; flex: none; }
+.screens { flex: 1; min-height: 0; display: grid; gap: 8px; }
+.screens.grid { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); grid-auto-rows: minmax(150px, 1fr); }
+.screens.has-focus { grid-template-rows: minmax(0, 1fr) auto; }
+.strip { display: flex; gap: 8px; height: 90px; }
+.strip .tile { flex: 0 0 160px; }
+.tile { position: relative; background: #000; border-radius: 8px; overflow: hidden; min-height: 0; min-width: 0; cursor: pointer; }
+.tile video { width: 100%; height: 100%; object-fit: contain; display: block; }
+.tile:fullscreen { border-radius: 0; cursor: default; }
+.tag { position: absolute; left: 8px; top: 8px; background: #000a; font-size: 11px; padding: 3px 8px; border-radius: 4px; }
+.xbtn { position: absolute; right: 8px; top: 8px; width: 28px; height: 28px; padding: 0; background: #000a; }
+
+.chat { display: flex; flex-direction: column; gap: 6px; min-height: 0; flex: 1; }
+.chat.compact { flex: none; height: 190px; }
+.chat.collapsed { height: auto; flex: none; }
+.chathead { display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 11px; }
+.chathead button { background: transparent; padding: 2px 6px; }
+.msgs { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.msg { user-select: text; word-break: break-word; white-space: pre-wrap; }
+.msg b { font-weight: 500; }
+.inp { display: flex; gap: 6px; flex: none; }
+.inp input { flex: 1; }
+.xfer { font-size: 12px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.xfer a { color: var(--accent); }
+.warn { color: #e6a23c; }
+
+.bar { grid-column: 1 / 3; background: var(--bg-1); display: flex; align-items: center; gap: 6px; padding: 0 10px; border-top: 1px solid var(--line); }
+.who { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.cb { width: 34px; height: 34px; padding: 0; }
+.cb.off { background: var(--red); color: #fff; }
+
+.overlay { position: fixed; inset: 0; background: #000b; display: flex; align-items: center; justify-content: center; z-index: 10; }
+.modal { background: var(--bg-2); border-radius: 10px; padding: 16px; width: min(560px, 92vw); max-height: 88vh; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.modal h3 { margin: 0 0 4px; font-weight: 500; }
+.modal label { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.sources { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.sources button { flex-direction: column; width: 160px; padding: 6px; font-size: 11px; }
+.sources img { width: 100%; border-radius: 4px; }
+
+.av { overflow: hidden; }
+.av img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+body { display: block; background: var(--bg-0); }
+#root { display: block; width: 100%; height: 100%; margin: 0; }
+
+.srv.copy { cursor: pointer; border-radius: 6px; }
+.srv.copy:hover { background: var(--bg-4); color: var(--text); }
+
+.banner { display: flex; align-items: center; justify-content: space-between; }
+.banner button { padding: 2px 8px; font-size: 12px; }

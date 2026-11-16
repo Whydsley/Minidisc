@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { loadRnnoise, RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor'
+import { isSafeAvatar } from './ui'
 import rnnoiseWorkletPath from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url'
 import rnnoiseWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url'
 import rnnoiseSimdWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url'
@@ -170,7 +171,7 @@ async function openMic(deviceId: string, noise: NoiseMode, boost: number) : Prom
   }
 }
 
-export function useVoiceRoom(displayName: string) {
+export function useVoiceRoom(displayName: string, avatar: string) {
   const [joined, setJoined] = useState(false)
   const [peerIds, setPeerIds] = useState<string[]>([])
   const [muted, setMuted] = useState(false)
@@ -180,6 +181,8 @@ export function useVoiceRoom(displayName: string) {
   const [transfers, setTransfers] = useState<Transfer[]>([])
   const [volumes, setVolumes] = useState<Record<string, number>>({})
   const [names, setNames] = useState<Record<string, string>>({})
+  const [avatars, setAvatars] = useState<Record<string, string>>({})
+  const [localScreen, setLocalScreen] = useState<MediaStream | null>(null)
 
   const socketRef = useRef<Socket | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
@@ -191,6 +194,8 @@ export function useVoiceRoom(displayName: string) {
   const urlsRef = useRef<Map<string, string>>(new Map())
   const nameRef = useRef(displayName)
   nameRef.current = displayName
+  const avatarRef = useRef(avatar)
+  avatarRef.current = avatar
   const volumeCtxRef = useRef<AudioContext | null>(null)
   const gainsRef = useRef<Map<string, GainNode>>(new Map())
   const boostRef = useRef(1)
@@ -222,8 +227,9 @@ export function useVoiceRoom(displayName: string) {
     peer.chat = chatCh
     peer.files = filesCh
 
-    chatCh.onopen = () =>
-      chatCh.send(JSON.stringify({ t: 'hello', name: cleanName(nameRef.current) }))
+      chatCh.onopen = () => chatCh.send(
+        JSON.stringify({ t: 'hello', name: cleanName(nameRef.current), avatar: avatarRef.current })
+      )
 
     chatCh.onmessage = (e) => {
       if (typeof e.data !== 'string') return
@@ -232,6 +238,7 @@ export function useVoiceRoom(displayName: string) {
         if (m.t === 'hello') {
           peer.name = cleanName(m.name)
           setNames((n) => ({ ...n, [peerId]: peer.name! }))
+            if (isSafeAvatar(m.avatar)) setAvatars((a) => ({ ...a, [peerId]: m.avatar }))
         } else if (typeof m.text === 'string') {
           addChat({
             key: newKey(),
@@ -503,6 +510,11 @@ export function useVoiceRoom(displayName: string) {
     audioElsRef.current.delete(peerId)
     gainsRef.current.get(peerId)?.disconnect()
     gainsRef.current.delete(peerId)
+    setAvatars((a) => {
+      const next = { ...a }
+      delete next[peerId]
+      return next
+    })
     setVolumes((v) => {
       const next = { ...v }
       delete next[peerId]
@@ -597,6 +609,7 @@ export function useVoiceRoom(displayName: string) {
     track.onended = () => stopShare()
 
     screenStreamRef.current = stream
+    setLocalScreen(stream)
     peersRef.current.forEach((peer) => attachScreen(peer))
     setSharing(true)
   }
@@ -610,6 +623,7 @@ export function useVoiceRoom(displayName: string) {
         peer.screenSender = undefined
       }
     })
+    setLocalScreen(null)
     setSharing(false)
   }
 
@@ -675,6 +689,8 @@ export function useVoiceRoom(displayName: string) {
     transfers,
     volumes,
     names,
+    avatars,
+    localScreen,
     join,
     leave,
     toggleMute,

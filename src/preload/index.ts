@@ -3,8 +3,21 @@ import { electronAPI } from '@electron-toolkit/preload'
 
 // Custom APIs for renderer
 const api = {
+  startHost: () => ipcRenderer.invoke('host:start'),
+  stopHost: () => ipcRenderer.invoke('host:stop'),
   getScreenSources: () => ipcRenderer.invoke('screen:sources'),
-  selectScreenSource: (id: string) => ipcRenderer.invoke('screen:select', id)
+  selectScreenSource: (id: string) => ipcRenderer.invoke('screen:select', id),
+
+  minimize: () => ipcRenderer.invoke('win:minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('win:toggle-maximize'),
+  close: () => ipcRenderer.invoke('win:close'),
+  onMaximizeChange: (cb: (maximized: boolean) => void) => {
+    const handler = (_e: unknown, value: boolean): void => cb(value)
+    ipcRenderer.on('win:maximized', handler)
+    return () => {
+      ipcRenderer.removeListener('win:maximized', handler)
+    }
+  }
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

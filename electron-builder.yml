@@ -1,5 +1,8 @@
-appId: com.electron.app
-productName: minidisc
+appId: com.whydsley.minidisc
+productName: Minidisc
+extraResources:
+  - from: bin/cloudflared.exe
+    to: cloudflared.exe
 directories:
   buildResources: build
 files:
@@ -12,12 +15,14 @@ files:
 asarUnpack:
   - resources/**
 win:
-  executableName: minidisc
+  executableName: Minidisc
 nsis:
-  artifactName: ${name}-${version}-setup.${ext}
+  artifactName: Minidisc-${version}-setup.${ext}
+  oneClick: false
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+  allowToChangeInstallationDirectory: true
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:
