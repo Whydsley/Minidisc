@@ -96,3 +96,8 @@ body { display: block; background: var(--bg-0); }
 
 .banner { display: flex; align-items: center; justify-content: space-between; }
 .banner button { padding: 2px 8px; font-size: 12px; }
+
+.msg.sys { color: var(--muted); font-style: italic; font-size: 12px; }
+
+.vslider { position: absolute; right: 8px; bottom: 8px; width: 110px; opacity: 0; }
+.tile:hover .vslider { opacity: 1; }

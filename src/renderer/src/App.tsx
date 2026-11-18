@@ -121,11 +121,11 @@ export default function App() {
     v.setMicBoost(n)
   }
 
-  async function handlePick(id: string, quality: ShareQuality) {
+    async function handlePick(id: string, quality: ShareQuality, withAudio: boolean) {
     setPicker(false)
     try {
       setError('')
-      await v.startShare(id, quality)
+      await v.startShare(id, quality, withAudio)
     } catch (e) {
       setError(String(e))
     }

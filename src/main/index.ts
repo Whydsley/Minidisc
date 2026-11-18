@@ -3,8 +3,11 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { startHost, stopHost } from './hostServer'
+import { logFilePath, writeLog } from './logger'
 
 let selectedSourceId: string | null = null
+
+let selectedAudio = false
 
 function createWindow(): void {
   // Create the browser window.
@@ -25,6 +28,12 @@ function createWindow(): void {
   })
 
   mainWindow.on('ready-to-show', () => {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.control && input.shift && input.key.toLowerCase() === 'i') {
+      mainWindow.webContents.toggleDevTools()
+      event.preventDefault()
+    }
+  })
     mainWindow.on('maximize', () => mainWindow.webContents.send('win:maximized', true))
     mainWindow.on('unmaximize', () => mainWindow.webContents.send('win:maximized', false))
     mainWindow.show()
@@ -66,6 +75,13 @@ app.whenReady().then(() => {
   ipcMain.handle('host:start', () => startHost())
   ipcMain.handle('host:stop', () => stopHost())
   ipcMain.handle('win:minimize', (e) => winOf(e)?.minimize())
+  ipcMain.on('log:write', (_e, source: unknown, message: unknown) => {
+    if (typeof source === 'string' && typeof message === 'string') {
+      writeLog(source.slice(0, 20), message)
+    }
+  })
+  ipcMain.handle('log:open', () => shell.showItemInFolder(logFilePath()))
+  writeLog('app', `started v${app.getVersion()} electron ${process.versions.electron}`)
   ipcMain.handle('win:toggle-maximize', (e) => {
     const w = winOf(e)
     if (!w) return
@@ -89,22 +105,26 @@ app.whenReady().then(() => {
     fetchWindowIcons: false
   })
   return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
-})
+  })
 
-ipcMain.handle('screen:select', (_event, id: unknown) => {
-  selectedSourceId = typeof id === 'string' ? id : null
-})
+  ipcMain.handle('screen:select', (_event, id: unknown, withAudio: unknown) => {
+    selectedSourceId = typeof id === 'string' ? id : null
+    selectedAudio = withAudio === true
+  })
 
-session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
-  desktopCapturer
-    .getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
-    .then((sources) => {
-      const source = sources.find((s) => s.id === selectedSourceId)
-      selectedSourceId = null
-      if (source) callback({ video: source })
-      else callback({})
-    })
-})
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    const wantsAudio = selectedAudio
+    desktopCapturer
+      .getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } })
+      .then((sources) => {
+        const source = sources.find((s) => s.id === selectedSourceId)
+        selectedSourceId = null
+        selectedAudio = false
+        if (!source) callback({})
+        else if (wantsAudio) callback({ video: source, audio: 'loopback' })
+        else callback({ video: source })
+      })
+  })
 })
 
 // Quit when all windows are closed, except on macOS. There, it's common

@@ -43,7 +43,8 @@ export default function SettingsModal(p: Props) {
           value={p.boost}
           onChange={(e) => p.onBoost(Number(e.target.value))}
         />
-
+        
+        <button onClick={() => window.api.openLogs()}>Open logs folder</button>
         <button onClick={p.onClose}>Close</button>
       </div>
     </div>

@@ -52,11 +52,15 @@ export default function ChatPanel({ chat, transfers, compact, onSend, onSendFile
 
       {!hidden && (
         <div className="msgs">
-          {chat.map((m) => (
-            <div key={m.key} className="msg">
-              <b style={{ color: m.self ? '#7f8cf5' : colorFor(m.from) }}>{m.from}</b> {m.text}
-            </div>
-          ))}
+          {chat.map((m) =>
+            m.system ? (
+              <div key={m.key} className="msg sys">{m.text}</div>
+            ) : (
+              <div key={m.key} className="msg">
+                <b style={{ color: m.self ? '#7f8cf5' : colorFor(m.from) }}>{m.from}</b> {m.text}
+              </div>
+            )
+          )}
           {transfers.map((t) => (
             <div key={t.key} className="xfer">
               <span>{t.direction === 'in' ? '⬇' : '⬆'}</span>

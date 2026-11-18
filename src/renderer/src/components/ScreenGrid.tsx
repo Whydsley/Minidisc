@@ -1,21 +1,52 @@
 import { useRef, useState } from 'react'
-import { IconMaximize } from '@tabler/icons-react'
+import { IconMaximize, IconVolume, IconVolumeOff } from '@tabler/icons-react'
 
 type TileProps = { stream: MediaStream; label: string; onClick: () => void }
 
 function Tile({ stream, label, onClick }: TileProps) {
   const box = useRef<HTMLDivElement>(null)
+  const [muted, setMuted] = useState(false)
+  const [volume, setVolume] = useState(100)
+  const local = label.startsWith('Your screen') // your own preview must stay silent
+
   return (
     <div ref={box} className="tile" onClick={onClick}>
       <video
         autoPlay
         playsInline
-        muted
         ref={(el) => {
-          if (el && el.srcObject !== stream) el.srcObject = stream
+          if (!el) return
+          if (el.srcObject !== stream) el.srcObject = stream
+          el.muted = local || muted
+          el.volume = volume / 100
         }}
       />
       <span className="tag">{label}</span>
+      {!local && (
+        <button
+          className="xbtn"
+          style={{ right: 44 }}
+          aria-label={muted ? 'Unmute screen sound' : 'Mute screen sound'}
+          onClick={(e) => {
+            e.stopPropagation()
+            setMuted(!muted)
+          }}
+        >
+          {muted ? <IconVolumeOff size={16} /> : <IconVolume size={16} />}
+        </button>
+      )}
+      {!local && (
+        <input
+          className="vslider"
+          type="range"
+          min={0}
+          max={100}
+          value={volume}
+          aria-label="Screen sound volume"
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => setVolume(Number(e.target.value))}
+        />
+      )}
       <button
         className="xbtn"
         aria-label="Full screen"

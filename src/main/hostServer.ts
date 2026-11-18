@@ -5,6 +5,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import { Server } from 'socket.io'
+import { writeLog } from './logger'
 
 let httpServer: HttpServer | null = null
 let io: Server | null = null
@@ -38,6 +39,7 @@ export async function startHost(): Promise<HostInfo> {
   io = server
 
   server.on('connection', (socket) => {
+    writeLog('server', `connected ${socket.id}`)
     socket.on('join', (roomId: unknown) => {
       if (typeof roomId !== 'string' || roomId.length > 64) return
       const room = server.sockets.adapter.rooms.get(roomId)
@@ -56,7 +58,8 @@ export async function startHost(): Promise<HostInfo> {
       target.emit('signal', { from: socket.id, data: msg.data })
     })
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason) => {
+      writeLog('server', `disconnected ${socket.id}: ${reason}`)
       const roomId = socket.data.roomId as string | undefined
       if (roomId) socket.to(roomId).emit('peer-left', socket.id)
     })
@@ -72,7 +75,7 @@ export async function startHost(): Promise<HostInfo> {
     const publicUrl = await new Promise<string>((resolve, reject) => {
       const child = spawn(
         exe,
-        ['tunnel', '--url', `http://127.0.0.1:${port}`, '--no-autoupdate'],
+          ['tunnel', '--url', `http://127.0.0.1:${port}`, '--no-autoupdate', '--protocol', 'http2'],
         { windowsHide: true }
       )
       tunnel = child
@@ -82,6 +85,7 @@ export async function startHost(): Promise<HostInfo> {
 
       const onData = (buf: Buffer): void => {
         const text = buf.toString()
+        writeLog('tunnel', text.trim())
         const m = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i)
         if (m) url = m[0]
         if (/Registered tunnel connection/i.test(text)) registered = true
@@ -97,7 +101,8 @@ export async function startHost(): Promise<HostInfo> {
         clearTimeout(timer)
         reject(e)
       })
-      child.once('exit', () => {
+      child.once('exit', (code) => {
+        writeLog('tunnel', `cloudflared exited, code ${code}`)
         clearTimeout(timer)
         reject(new Error('The tunnel stopped'))
       })

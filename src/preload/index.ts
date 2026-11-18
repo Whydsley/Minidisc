@@ -6,7 +6,10 @@ const api = {
   startHost: () => ipcRenderer.invoke('host:start'),
   stopHost: () => ipcRenderer.invoke('host:stop'),
   getScreenSources: () => ipcRenderer.invoke('screen:sources'),
-  selectScreenSource: (id: string) => ipcRenderer.invoke('screen:select', id),
+  selectScreenSource: (id: string, withAudio: boolean) => ipcRenderer.invoke('screen:select', id, withAudio),
+
+  log: (source: string, message: string) => ipcRenderer.send('log:write', source, message),
+  openLogs: () => ipcRenderer.invoke('log:open'),
 
   minimize: () => ipcRenderer.invoke('win:minimize'),
   toggleMaximize: () => ipcRenderer.invoke('win:toggle-maximize'),

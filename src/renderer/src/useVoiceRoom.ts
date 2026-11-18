@@ -2,9 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { io, Socket } from 'socket.io-client'
 import { loadRnnoise, RnnoiseWorkletNode } from '@sapphi-red/web-noise-suppressor'
 import { isSafeAvatar } from './ui'
+import { playCue } from './sounds'
 import rnnoiseWorkletPath from '@sapphi-red/web-noise-suppressor/rnnoiseWorklet.js?url'
 import rnnoiseWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise.wasm?url'
 import rnnoiseSimdWasmPath from '@sapphi-red/web-noise-suppressor/rnnoise_simd.wasm?url'
+import { log } from './log'
 
 const ROOM = 'main'
 
@@ -35,6 +37,8 @@ type Peer = {
   makingOffer: boolean
   ignoreOffer: boolean
   screenSender?: RTCRtpSender
+  screenAudioSender?: RTCRtpSender
+  voiceStreamId?: string
   micSender?: RTCRtpSender
   chat?: RTCDataChannel
   files?: RTCDataChannel
@@ -53,7 +57,7 @@ export const PRESETS: Record<
   qhd60: { label: '1440p 60 fps', width: 2560, height: 1440, fps: 60, bitrate: 16_000_000 }
 }
 
-export type ChatMsg = { key: string; from: string; text: string; self: boolean }
+export type ChatMsg = { key: string; from: string; text: string; self: boolean; system?: boolean }
 
 export type Transfer = {
   key: string
@@ -191,6 +195,7 @@ export function useVoiceRoom(displayName: string, avatar: string) {
   const peersRef = useRef<Map<string, Peer>>(new Map())
   const audioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map())
   const micRef = useRef<Mic | null>(null)
+  const statsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const urlsRef = useRef<Map<string, string>>(new Map())
   const nameRef = useRef(displayName)
   nameRef.current = displayName
@@ -199,6 +204,7 @@ export function useVoiceRoom(displayName: string, avatar: string) {
   const volumeCtxRef = useRef<AudioContext | null>(null)
   const gainsRef = useRef<Map<string, GainNode>>(new Map())
   const boostRef = useRef(1)
+  const announceRef = useRef<Set<string>>(new Set())
 
   function send(to: string, data: Signal) {
     socketRef.current?.emit('signal', { to, data })
@@ -237,6 +243,15 @@ export function useVoiceRoom(displayName: string, avatar: string) {
         const m = JSON.parse(e.data)
         if (m.t === 'hello') {
           peer.name = cleanName(m.name)
+          if (announceRef.current.delete(peerId)) {
+            addChat({
+              key: newKey(),
+              from: '',
+              text: `${peer.name} joined`,
+              self: false,
+              system: true
+            })
+          }
           setNames((n) => ({ ...n, [peerId]: peer.name! }))
             if (isSafeAvatar(m.avatar)) setAvatars((a) => ({ ...a, [peerId]: m.avatar }))
         } else if (typeof m.text === 'string') {
@@ -416,6 +431,9 @@ export function useVoiceRoom(displayName: string, avatar: string) {
     } catch {
       /* not critical */
     }
+
+    const audioTrack = stream.getAudioTracks()[0]
+    if (audioTrack) peer.screenAudioSender = peer.pc.addTrack(audioTrack, stream)
   }
 
   // ---------- peers ----------
@@ -430,6 +448,17 @@ export function useVoiceRoom(displayName: string, avatar: string) {
       sendChain: Promise.resolve()
     }
     const { pc } = peer
+
+    pc.onconnectionstatechange = () => log('peer', `${peerId.slice(0, 4)} connection=${pc.connectionState}`)
+    pc.oniceconnectionstatechange = () => {
+      log('peer', `${peerId.slice(0, 4)} ice=${pc.iceConnectionState}`)
+      if (pc.iceConnectionState === 'failed') pc.restartIce()
+      if (pc.iceConnectionState === 'disconnected') {
+        setTimeout(() => {
+          if (pc.iceConnectionState === 'disconnected') pc.restartIce()
+        }, 4000)
+      }
+    }
 
     pc.onnegotiationneeded = async () => {
       try {
@@ -450,6 +479,9 @@ export function useVoiceRoom(displayName: string, avatar: string) {
     pc.ontrack = (e) => {
       const stream = e.streams[0]
       if (e.track.kind === 'audio') {
+        // A second audio stream from the same person is the sound of their shared screen
+        if (peer.voiceStreamId && stream.id !== peer.voiceStreamId) return
+        peer.voiceStreamId = stream.id
         // Muted element: Chromium needs it attached, or WebRTC audio stays silent in Web Audio
         let audio = audioElsRef.current.get(peerId)
         if (!audio) {
@@ -535,9 +567,26 @@ export function useVoiceRoom(displayName: string, avatar: string) {
 
     const socket = io(serverUrl)
     socketRef.current = socket
+    let firstConnect = true
+    socket.on('connect', () => {
+      log('socket', `connected id=${socket.id}`)
+      if (firstConnect) {
+        firstConnect = false
+        return
+      }
+      // The connection came back with a new id: rebuild the room from scratch
+      log('socket', 'reconnected, rejoining')
+      peersRef.current.forEach((_, id) => removePeer(id))
+      socket.emit('join', ROOM)
+    })
+    socket.on('disconnect', (reason) => log('socket', `disconnected: ${reason}`))
+    socket.on('connect_error', (err) => log('socket', `connect_error: ${err.message}`))
 
     socket.on('peers', (existing: string[]) => existing.forEach((id) => createPeer(id)))
-    socket.on('peer-joined', () => {})
+    socket.on('peer-joined', (id: string) => {
+      announceRef.current.add(id)
+      playCue('join')
+    })
 
     socket.on('signal', async ({ from, data }: { from: string; data: Signal }) => {
       const peer = peersRef.current.get(from) ?? createPeer(from)
@@ -567,7 +616,13 @@ export function useVoiceRoom(displayName: string, avatar: string) {
       }
     })
 
-    socket.on('peer-left', (peerId: string) => removePeer(peerId))
+    socket.on('peer-left', (peerId: string) => {
+      const who = peersRef.current.get(peerId)?.name ?? 'Someone'
+      playCue('leave')
+      announceRef.current.delete(peerId)
+      addChat({ key: newKey(), from: '', text: `${who} left`, self: false, system: true })
+      removePeer(peerId)
+    })
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -588,20 +643,23 @@ export function useVoiceRoom(displayName: string, avatar: string) {
 
     socket.emit('join', ROOM)
     setJoined(true)
+
+    log('room', 'joined')
+    statsTimerRef.current = setInterval(logStats, 10000)
   }
 
-  async function startShare(sourceId: string, quality: ShareQuality) {
+  async function startShare(sourceId: string, quality: ShareQuality, withAudio: boolean) {
     qualityRef.current = quality
     const p = PRESETS[quality]
 
-    await window.api.selectScreenSource(sourceId)
+    await window.api.selectScreenSource(sourceId, withAudio)
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         width: { ideal: p.width },
         height: { ideal: p.height },
         frameRate: { ideal: p.fps }
       },
-      audio: false
+      audio: withAudio ? ({ restrictOwnAudio: true } as MediaTrackConstraints) : false
     })
 
     const track = stream.getVideoTracks()[0]
@@ -622,6 +680,10 @@ export function useVoiceRoom(displayName: string, avatar: string) {
         peer.pc.removeTrack(peer.screenSender)
         peer.screenSender = undefined
       }
+      if (peer.screenAudioSender) {
+        peer.pc.removeTrack(peer.screenAudioSender)
+        peer.screenAudioSender = undefined
+      }
     })
     setLocalScreen(null)
     setSharing(false)
@@ -641,15 +703,48 @@ export function useVoiceRoom(displayName: string, avatar: string) {
     gainsRef.current.clear()
     urlsRef.current.forEach((url) => URL.revokeObjectURL(url))
     urlsRef.current.clear()
+    announceRef.current.clear()
     setChat([])
     setTransfers([])
     setJoined(false)
     setMuted(false)
+    
+
+    if (statsTimerRef.current) clearInterval(statsTimerRef.current)
+    statsTimerRef.current = null
   }
 
   function setMicBoost(percent: number) {
     boostRef.current = percent / 100
     micRef.current?.setGain(boostRef.current)
+  }
+
+  async function logStats() {
+    for (const [id, peer] of peersRef.current) {
+      try {
+        const stats = await peer.pc.getStats()
+        const cands = new Map<string, any>()
+        stats.forEach((r) => {
+          if (r.type === 'local-candidate' || r.type === 'remote-candidate') cands.set(r.id, r)
+        })
+        const parts: string[] = []
+        stats.forEach((r) => {
+          if (r.type === 'candidate-pair' && r.nominated && r.state === 'succeeded') {
+            const l = cands.get(r.localCandidateId)?.candidateType
+            const m = cands.get(r.remoteCandidateId)?.candidateType
+            parts.push(`rtt=${Math.round((r.currentRoundTripTime ?? 0) * 1000)}ms path=${l}/${m}`)
+          } else if (r.type === 'inbound-rtp') {
+            const fps = r.framesPerSecond ? ` fps=${r.framesPerSecond}` : ''
+            parts.push(`in-${r.kind} lost=${r.packetsLost} jitter=${Math.round((r.jitter ?? 0) * 1000)}ms${fps}`)
+          } else if (r.type === 'outbound-rtp' && r.kind === 'video') {
+            parts.push(`out-video fps=${r.framesPerSecond ?? 0} limit=${r.qualityLimitationReason}`)
+          }
+        })
+        log('stats', `${id.slice(0, 4)} ${parts.join(' | ')}`)
+      } catch {
+        /* the peer closed meanwhile */
+      }
+    }
   }
 
   function toggleMute() {
